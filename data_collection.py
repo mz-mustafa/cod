@@ -8,6 +8,25 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+class CookieAnalysisKeys:
+    """Constants for cookie analysis to avoid string repetition and typos"""
+    # Cookie metrics
+    FIRST_PARTY_COOKIES = 'firstPartyCookies'
+    CCM_PROVIDER_COOKIES = 'ccmProviderCookies'
+    NO_THIRD_PARTY_COOKIES = 'noThirdPartyCookies'
+    
+    # Request metrics
+    FIRST_PARTY_REQUESTS = 'firstPartyRequests'
+    CCM_PROVIDER_REQUESTS = 'ccmProviderRequests'
+    NO_THIRD_PARTY_REQUESTS = 'noThirdPartyRequests'
+    
+    # Network
+    NETWORK_CHAINS = 'networkChains'
+    
+    # Page metrics
+    PAGE_NOT_INTERACTABLE = 'pageNotInteractable'
+    PAGE_SCROLLABLE = 'pageScrollable'
+
 @dataclass
 class NetworkState:
     """Enhanced structure for network state"""
@@ -150,12 +169,13 @@ class DataCollectionService:
                 self.errors.append(f"Failed to visit URL: {url_result.destination_url}")
                 return False
 
-            # 2. Initial Page State Capture
-            initial_state = self.browser.get_page_state()
             
-            # 3. Banner Detection (simplified)
+            
+            # 2. Banner Detection
             provider = self.browser.detect_cookie_banner()
             self.browser.current_provider = provider  # Store for later use
+
+            initial_state = self.browser.get_page_state(provider)
             
             # 4. Find meaningful clickable elements
             clickable_elements = self.browser.find_meaningful_clickables(
@@ -229,7 +249,7 @@ class DataCollectionService:
                 flow.interactions = self.browser.perform_interaction_sequence()
 
             # Capture final state
-            final_state = self.browser.get_page_state()
+            final_state = self.browser.get_page_state(provider=provider)
             flow.network_state = self._create_network_state(final_state)
             flow.cookies = final_state.cookies
             flow.timestamp = time.time()
@@ -246,6 +266,8 @@ class DataCollectionService:
             'timestamp': req.timestamp,
             'request_id': req.request_id,
             'is_third_party': req.is_third_party,
+            'is_first_party': req.is_first_party,
+            'is_ccm_provider': req.is_ccm_provider,
             'domain': req.domain
         } for req in browser_state.network_requests]
 
@@ -256,6 +278,7 @@ class DataCollectionService:
                 chain = {
                     'source': req.initiator.get('stack', {}).get('callFrames', [{}])[0].get('url', 'unknown'),
                     'target': req.url,
+                    'timestamp': req.timestamp,
                     'type': 'script'
                 }
                 chains.append(chain)
@@ -266,61 +289,63 @@ class DataCollectionService:
             request_chains=chains
         )
 
-    def create_summary(self, result: ConsentCheckResult) -> Dict:
-        """Create a summarized version of the consent check result"""
-        return {
-            'url': result.url_info['requested_url'],
-            'status': result.url_info['status_code'],
-            'banner_found': result.ccm_detection['banner_found'],
-            'provider': result.ccm_detection['provider_name'],
-            'interactable_pre-consent': result.ccm_detection['accessibility_with_banner'],
-            'scrollable_pre-consent': result.ccm_detection["can_scroll"],
-            'accept_successful': result.accept_flow.consent.action_successful,
-            'reject_successful': result.reject_flow.consent.action_successful,
-            'initial_cookies': len(result.page_landing['state']['cookies']) if result.page_landing['state'] else 0,
-            'accept_cookies': len(result.accept_flow.cookies) if result.accept_flow.cookies else 0,
-            'reject_cookies': len(result.reject_flow.cookies) if result.reject_flow.cookies else 0,
-            'has_errors': len(result.errors) > 0
-        }
     
     def generate_cod_results(self, result: ConsentCheckResult, include_network_chains: bool = True) -> dict:
+        """
+        Generate structured analysis of cookie and request behavior across consent states.
         
-        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState) -> dict:
-            """Helper to analyze cookies and network requests"""
-            first_party_cookies = [c for c in state_cookies if not c.get('is_third_party', True)]
-            third_party_cookies = [c for c in state_cookies if c.get('is_third_party', False)]
-            third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
+        Args:
+            result: Raw collection results including pre and post consent states
+            include_network_chains: Whether to include detailed request chain analysis
             
+        Returns:
+            Dictionary containing analysis of cookie and request behavior
+        """
+        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState) -> dict:
+            """Analyze cookies and requests for a given state"""
+            # Cookie classification
+            first_party_cookies = [c for c in state_cookies if c.get('is_first_party', False)]
+            third_party_cookies = [c for c in state_cookies if c.get('is_third_party', False)]
+            ccm_provider_cookies = [c for c in state_cookies if c.get('is_ccm_provider', False)]
+            
+            # Request classification
+            first_party_requests = [r for r in state_network.requests if r.get('is_first_party', False)]
+            third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
+            ccm_provider_requests = [r for r in state_network.requests if r.get('is_ccm_provider', False)]
+            
+            k = CookieAnalysisKeys
             analysis_dict = {
-                'noFirstPartyCookies': len(first_party_cookies) == 0,
-                'noThirdPartyCookies': len(third_party_cookies) == 0,
-                'noThirdPartyRequests': len(third_party_requests) == 0
+                k.FIRST_PARTY_COOKIES: len(first_party_cookies) > 0,
+                k.CCM_PROVIDER_COOKIES: len(ccm_provider_cookies) > 0,
+                k.NO_THIRD_PARTY_COOKIES: len(third_party_cookies) == 0,
+                k.FIRST_PARTY_REQUESTS: len(first_party_requests) > 0,
+                k.CCM_PROVIDER_REQUESTS: len(ccm_provider_requests) > 0,
+                k.NO_THIRD_PARTY_REQUESTS: len(third_party_requests) == 0
             }
             
             if include_network_chains:
-                analysis_dict['networkChains'] = state_network.request_chains
+                analysis_dict[k.NETWORK_CHAINS] = state_network.request_chains
                 
             return analysis_dict
         
-        # Get pre-consent state
+        # Get states for different phases
         pre_consent_state = result.page_landing.get('state', {})
         pre_consent_analysis = _analyze_cookies_and_requests(
             pre_consent_state.get('cookies', []),
             pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[]))
         )
         
-        # Get post-consent accept state
         accept_analysis = _analyze_cookies_and_requests(
             result.accept_flow.cookies,
             result.accept_flow.network_state
         )
         
-        # Get post-consent reject state
         reject_analysis = _analyze_cookies_and_requests(
             result.reject_flow.cookies,
             result.reject_flow.network_state
         )
         
+        k = CookieAnalysisKeys
         # Build final analysis object
         analysis = {
             "url_info": {
@@ -334,115 +359,43 @@ class DataCollectionService:
                 "provider_name": result.ccm_detection['provider_name']
             },
             "preConsent": {
-                "pageNotInteractable": not result.ccm_detection['accessibility_with_banner'],
-                "pageScrollable": result.ccm_detection["can_scroll"],
-                "noFirstPartyCookies": pre_consent_analysis['noFirstPartyCookies'],
-                "noThirdPartyCookies": pre_consent_analysis['noThirdPartyCookies'],
-                "noThirdPartyRequests": pre_consent_analysis['noThirdPartyRequests']
+                k.PAGE_NOT_INTERACTABLE: not result.ccm_detection['accessibility_with_banner'],
+                k.PAGE_SCROLLABLE: result.ccm_detection["can_scroll"],
+                k.FIRST_PARTY_COOKIES: pre_consent_analysis[k.FIRST_PARTY_COOKIES],
+                k.CCM_PROVIDER_COOKIES: pre_consent_analysis[k.CCM_PROVIDER_COOKIES],
+                k.NO_THIRD_PARTY_COOKIES: pre_consent_analysis[k.NO_THIRD_PARTY_COOKIES],
+                k.FIRST_PARTY_REQUESTS: pre_consent_analysis[k.FIRST_PARTY_REQUESTS],
+                k.CCM_PROVIDER_REQUESTS: pre_consent_analysis[k.CCM_PROVIDER_REQUESTS],
+                k.NO_THIRD_PARTY_REQUESTS: pre_consent_analysis[k.NO_THIRD_PARTY_REQUESTS]
             },
             "postConsent": {
                 "onAccept": {
-                    "noAdditionalFirstPartyCookies": accept_analysis['noFirstPartyCookies'],
-                    "noAdditionalThirdPartyCookies": accept_analysis['noThirdPartyCookies'],
-                    "noAdditionalThirdPartyRequests": accept_analysis['noThirdPartyRequests']
+                    k.FIRST_PARTY_COOKIES: accept_analysis[k.FIRST_PARTY_COOKIES],
+                    k.CCM_PROVIDER_COOKIES: accept_analysis[k.CCM_PROVIDER_COOKIES],
+                    k.NO_THIRD_PARTY_COOKIES: accept_analysis[k.NO_THIRD_PARTY_COOKIES],
+                    k.FIRST_PARTY_REQUESTS: accept_analysis[k.FIRST_PARTY_REQUESTS],
+                    k.CCM_PROVIDER_REQUESTS: accept_analysis[k.CCM_PROVIDER_REQUESTS],
+                    k.NO_THIRD_PARTY_REQUESTS: accept_analysis[k.NO_THIRD_PARTY_REQUESTS]
                 },
                 "onReject": {
-                    "noAdditionalFirstPartyCookies": reject_analysis['noFirstPartyCookies'],
-                    "noAdditionalThirdPartyCookies": reject_analysis['noThirdPartyCookies'],
-                    "noAdditionalThirdPartyRequests": reject_analysis['noThirdPartyRequests']
+                    k.FIRST_PARTY_COOKIES: reject_analysis[k.FIRST_PARTY_COOKIES],
+                    k.CCM_PROVIDER_COOKIES: reject_analysis[k.CCM_PROVIDER_COOKIES],
+                    k.NO_THIRD_PARTY_COOKIES: reject_analysis[k.NO_THIRD_PARTY_COOKIES],
+                    k.FIRST_PARTY_REQUESTS: reject_analysis[k.FIRST_PARTY_REQUESTS],
+                    k.CCM_PROVIDER_REQUESTS: reject_analysis[k.CCM_PROVIDER_REQUESTS],
+                    k.NO_THIRD_PARTY_REQUESTS: reject_analysis[k.NO_THIRD_PARTY_REQUESTS]
                 }
             }
         }
         
         # Add network chains data if requested
         if include_network_chains:
-            analysis["preConsent"]["networkChains"] = pre_consent_analysis['networkChains']
-            analysis["postConsent"]["onAccept"]["networkChains"] = accept_analysis['networkChains']
-            analysis["postConsent"]["onReject"]["networkChains"] = reject_analysis['networkChains']
+            analysis["preConsent"][k.NETWORK_CHAINS] = pre_consent_analysis[k.NETWORK_CHAINS]
+            analysis["postConsent"]["onAccept"][k.NETWORK_CHAINS] = accept_analysis[k.NETWORK_CHAINS]
+            analysis["postConsent"]["onReject"][k.NETWORK_CHAINS] = reject_analysis[k.NETWORK_CHAINS]
         
         return analysis
-    
-    def generate_consent_analysis0(self,result: ConsentCheckResult) -> dict:
-        """
-        Generate a structured analysis of consent mana gement behavior where all boolean values
-        are coded such that True indicates good/compliant behavior.
-        
-        Args:
-            result: ConsentCheckResult object containing raw data collection results
-            
-        Returns:
-            Dictionary containing structured analysis of consent behavior
-        """
-        
-        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState) -> dict:
-            """Helper to analyze cookies and network requests"""
-            first_party_cookies = [c for c in state_cookies if not c.get('is_third_party', True)]
-            third_party_cookies = [c for c in state_cookies if c.get('is_third_party', False)]
-            third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
-            
-            return {
-                'noFirstPartyCookies': len(first_party_cookies) == 0,
-                'noThirdPartyCookies': len(third_party_cookies) == 0,
-                'noThirdPartyRequests': len(third_party_requests) == 0,
-                'networkChains': state_network.request_chains
-            }
-        
-        # Get pre-consent state
-        pre_consent_state = result.page_landing.get('state', {})
-        pre_consent_analysis = _analyze_cookies_and_requests(
-            pre_consent_state.get('cookies', []),
-            pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[]))
-        )
-        
-        # Get post-consent accept state
-        accept_analysis = _analyze_cookies_and_requests(
-            result.accept_flow.cookies,
-            result.accept_flow.network_state
-        )
-        
-        # Get post-consent reject state
-        reject_analysis = _analyze_cookies_and_requests(
-            result.reject_flow.cookies,
-            result.reject_flow.network_state
-        )
-        
-        # Build final analysis object
-        analysis = {
-            "url_info": {
-                "requested_url": result.url_info['requested_url'],
-                "final_url": result.url_info['final_url'],
-                "status_code": result.url_info['status_code'],
-                "domain": result.url_info['domain']
-            },
-            "ccm_banner": {
-                "banner_found": result.ccm_detection['banner_found'],
-                "provider_name": result.ccm_detection['provider_name']
-            },
-            "preConsent": {
-                "pageNotInteractable": not result.ccm_detection['accessibility_with_banner'],
-                "pageScrollable": result.ccm_detection["can_scroll"],
-                "noFirstPartyCookies": pre_consent_analysis['noFirstPartyCookies'],
-                "noThirdPartyCookies": pre_consent_analysis['noThirdPartyCookies'],
-                "noThirdPartyRequests": pre_consent_analysis['noThirdPartyRequests'],
-                "networkChains": pre_consent_analysis['networkChains']
-            },
-            "postConsent": {
-                "onAccept": {
-                    "noAdditionalFirstPartyCookies": accept_analysis['noFirstPartyCookies'],
-                    "noAdditionalThirdPartyCookies": accept_analysis['noThirdPartyCookies'],
-                    "noAdditionalThirdPartyRequests": accept_analysis['noThirdPartyRequests'],
-                    "networkChains": accept_analysis['networkChains']
-                },
-                "onReject": {
-                    "noAdditionalFirstPartyCookies": reject_analysis['noFirstPartyCookies'],
-                    "noAdditionalThirdPartyCookies": reject_analysis['noThirdPartyCookies'],
-                    "noAdditionalThirdPartyRequests": reject_analysis['noThirdPartyRequests'],
-                    "networkChains": reject_analysis['networkChains']
-                }
-            }
-        }
-        
-        return analysis
+
 
     def _create_error_result(self, url_result: URLResult) -> ConsentCheckResult:
         """Create error result structure"""

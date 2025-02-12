@@ -10,6 +10,7 @@ class CookieProviderSignature:
     accept_button_ids: List[str]      # HTML IDs for accept buttons
     manage_button_ids: List[str]      # HTML IDs for manage/settings buttons
     provider_name: str                # Name of the provider
+    provider_base_domain: str         # Base domain of the provider 
 
 class TrustArcSignature(CookieProviderSignature):
     """TrustArc specific signature implementation"""
@@ -35,7 +36,9 @@ class TrustArcSignature(CookieProviderSignature):
                 "truste-cookie-preferences",
                 "truste-show-consent"
             ],
-            provider_name="TrustArc"
+            provider_name="TrustArc",
+            provider_base_domain="trustarc.com"
+
         )
 
 class OneTrustSignature(CookieProviderSignature):
@@ -58,7 +61,8 @@ class OneTrustSignature(CookieProviderSignature):
                 "onetrust-pc-btn-handler",
                 "cookie-settings-button"
             ],
-            provider_name="OneTrust"
+            provider_name="OneTrust",
+            provider_base_domain="cookielaw.org"
         )
 
 class ProviderRegistry:

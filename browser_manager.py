@@ -11,6 +11,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium import webdriver
 import json, time
 from urllib.parse import urlparse
+from tld import get_fld
 
 class NetworkRequest:
     """Enhanced structure for network request data"""
@@ -20,7 +21,9 @@ class NetworkRequest:
         self.timestamp = timestamp
         self.request_id = request_id
         self.domain = urlparse(url).netloc
-        self.is_third_party = None  # Will be set when page domain is known
+        self.is_third_party = None
+        self.is_first_party = None
+        self.is_ccm_provider = None
 
 class BrowserState:
     """Enhanced browser state information"""
@@ -30,19 +33,71 @@ class BrowserState:
         self.network_requests: List[NetworkRequest] = []
         self.page_domain: str = ""
 
-    def classify_parties(self, page_domain: str):
-        """Classify cookies and requests as first/third party"""
+    def classify_parties(self, page_domain: str, provider: CookieProviderSignature):
+        """
+        Classify cookies and requests with all three party flags:
+        is_ccm_provider, is_first_party, is_third_party
+        
+        Args:
+            page_domain: Domain of the current page
+            provider: Current CCM provider signature
+        """
         self.page_domain = page_domain
-        base_domain = self._get_base_domain(page_domain)
+        base_domain = get_fld(page_domain, fix_protocol=True)
+        provider_base_domain = provider.provider_base_domain if provider else None
         
         # Classify cookies
         for cookie in self.cookies:
             cookie_domain = cookie.get('domain', '').lstrip('.')
-            cookie['is_third_party'] = not self._is_same_domain(cookie_domain, base_domain)
+            try:
+                cookie_base_domain = get_fld(cookie_domain, fix_protocol=True)
+                
+                # First check if it's a CCM provider domain
+                if provider_base_domain and cookie_base_domain == provider_base_domain:
+                    cookie['is_ccm_provider'] = True
+                    cookie['is_first_party'] = False
+                    cookie['is_third_party'] = False
+                # Then check if it's first party
+                elif cookie_base_domain == base_domain:
+                    cookie['is_ccm_provider'] = False
+                    cookie['is_first_party'] = True
+                    cookie['is_third_party'] = False
+                # Otherwise it's third party
+                else:
+                    cookie['is_ccm_provider'] = False
+                    cookie['is_first_party'] = False
+                    cookie['is_third_party'] = True
+            except Exception:
+                # If domain parsing fails, consider it third party
+                cookie['is_ccm_provider'] = False
+                cookie['is_first_party'] = False
+                cookie['is_third_party'] = True
             
         # Classify network requests
         for request in self.network_requests:
-            request.is_third_party = not self._is_same_domain(request.domain, base_domain)
+            try:
+                request_base_domain = get_fld(request.domain, fix_protocol=True)
+                
+                # First check if it's a CCM provider domain
+                if provider_base_domain and request_base_domain == provider_base_domain:
+                    request.is_ccm_provider = True
+                    request.is_first_party = False
+                    request.is_third_party = False
+                # Then check if it's first party
+                elif request_base_domain == base_domain:
+                    request.is_ccm_provider = False
+                    request.is_first_party = True
+                    request.is_third_party = False
+                # Otherwise it's third party
+                else:
+                    request.is_ccm_provider = False
+                    request.is_first_party = False
+                    request.is_third_party = True
+            except Exception:
+                # If domain parsing fails, consider it third party
+                request.is_ccm_provider = False
+                request.is_first_party = False
+                request.is_third_party = True
 
     def _get_base_domain(self, domain: str) -> str:
         """Extract base domain from domain string"""
@@ -93,7 +148,7 @@ class BrowserManager:
             print(f"Error visiting URL {url}: {str(e)}")
             return False
             
-    def get_page_state(self) -> BrowserState:
+    def get_page_state(self, provider) -> BrowserState:
 
         """Capture enhanced page state"""
         state = BrowserState()
@@ -130,7 +185,7 @@ class BrowserManager:
             
             # Classify everything as first/third party
             if self.current_page_domain:
-                state.classify_parties(self.current_page_domain)
+                state.classify_parties(self.current_page_domain, provider)
             
         except Exception as e:
             print(f"Error capturing page state: {str(e)}")
