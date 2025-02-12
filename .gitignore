@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .env
 .idea/
+temp.py
+tester.py
+temp_for_AIO.py

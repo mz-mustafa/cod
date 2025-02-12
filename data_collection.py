@@ -1,30 +1,59 @@
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from url_processor import URLResult
-from browser_manager import BrowserManager, BrowserState
+from browser_manager import BrowserManager, BrowserState, NetworkRequest
 from provider_registry import CookieProviderSignature
 import time
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
+@dataclass
+class NetworkState:
+    """Enhanced structure for network state"""
+    requests: List[Dict]  # Network requests with chain information
+    analytics_tags: List[Dict]
+    request_chains: List[Dict]  # Reconstructed request chains
+
+@dataclass
+class ConsentAction:
+    """Structure for consent action results"""
+    action_performed: bool
+    action_successful: bool
+    button_found: bool
+    error: Optional[str]
+    timestamp: float
+
+@dataclass
+class InteractionState:
+    """Structure for interaction results"""
+    consent: ConsentAction
+    clickable_elements: List[Dict]
+    interactions: List[Dict]
+    network_state: NetworkState
+    cookies: List[Dict]
+    timestamp: float
 
 @dataclass
 class ConsentCheckResult:
-    """Complete structure for consent check results"""
+    """Enhanced structure for consent check results"""
     url_info: Dict
     ccm_detection: Dict
     page_landing: Dict    # Initial state
-    accept_flow: Dict     # After accept + interactions
-    reject_flow: Dict     # After reject + interactions
+    accept_flow: InteractionState
+    reject_flow: InteractionState
     errors: List[str]
 
 class DataCollectionService:
+
     def __init__(self, browser_manager: BrowserManager):
         self.browser = browser_manager
         self.errors: List[str] = []
         self.stored_element_info = []
 
     def _initialize_result(self, url_result: URLResult) -> ConsentCheckResult:
-        """Initialize result structure with URL info"""
+
+        """Initialize enhanced result structure"""
         return ConsentCheckResult(
             url_info={
                 "requested_url": url_result.requested_url,
@@ -37,221 +66,205 @@ class DataCollectionService:
                 "banner_found": False,
                 "provider_name": "",
                 "accessibility_with_banner": None,
+                "can_scroll": None,
                 "accessibility_issues": []
             },
             page_landing={
                 "state": None,
                 "timestamp": None
             },
-            accept_flow={
-                "consent": {
-                    "action_performed": False,
-                    "action_successful": False
-                },
-                "clickable_elements": [],
-                "interactions": [],
-                "final_state": None,
-                "timestamp": None
-            },
-            reject_flow={
-                "consent": {
-                    "action_performed": False,
-                    "action_successful": False
-                },
-                "clickable_elements": [],
-                "interactions": [],
-                "final_state": None,
-                "timestamp": None
-            },
+            accept_flow=InteractionState(
+                consent=ConsentAction(
+                    action_performed=False,
+                    action_successful=False,
+                    button_found=False,
+                    error=None,
+                    timestamp=None
+                ),
+                clickable_elements=[],
+                interactions=[],
+                network_state=NetworkState(requests=[], analytics_tags=[], request_chains=[]),
+                cookies=[],
+                timestamp=None
+            ),
+            reject_flow=InteractionState(
+                consent=ConsentAction(
+                    action_performed=False,
+                    action_successful=False,
+                    button_found=False,
+                    error=None,
+                    timestamp=None
+                ),
+                clickable_elements=[],
+                interactions=[],
+                network_state=NetworkState(requests=[], analytics_tags=[], request_chains=[]),
+                cookies=[],
+                timestamp=None
+            ),
             errors=[]
         )
-    
 
     def create_result(self, url_result: URLResult) -> ConsentCheckResult:
-        """Create structured result for a URL"""
+        """Create structured result for a URL with pre and post consent states"""
         try:
-            # Initialize result structure
+            # Initialize empty result structure
             result = self._initialize_result(url_result)
             
-            # Process landing state and accept flow
-            if self._process_landing_and_accept(url_result, result):
-                # Restart browser for reject flow
+            # A.1: Capture pre-consent state, detect banner, assess accessibility
+            pre_consent_success = self._capture_pre_consent_state(url_result, result)
+            if not pre_consent_success:
+                return result
+
+            provider = self.browser.current_provider
+            # Only proceed with consent flows if we found a banner
+            #TEMPORARY CHANGE FOR TESTING
+            if provider:
+
+                # A.2: Accept flow
+                self._capture_post_consent_state(provider, result, 'accept')
+                
+                # Reset browser for reject flow
                 self.browser.cleanup()
                 self.browser = BrowserManager(self.browser.provider_registry)
                 
-                # Process reject flow with fresh browser
-                self._process_landing_and_reject(url_result, result)
-
+                # A.3: Reject flow
+                if self.browser.visit_url(url_result.destination_url):
+                    self._capture_post_consent_state(provider, result, 'reject')
             result.errors = self.errors
+            self.browser.cleanup()
             return result
-
+            
         except Exception as e:
             self.errors.append(f"Error processing URL {url_result.destination_url}: {str(e)}")
-            return self._create_error_result(url_result)
-
-    def _process_landing_and_accept(self, url_result: URLResult, result: ConsentCheckResult) -> bool:
-        """Process landing state and accept flow"""
-        try:
-            if not self._process_landing_state(url_result, result):
-                return False
-
-            provider, accessibility_results = self.browser.detect_cookie_banner()
-            if provider:
-                self._process_banner_detection(provider, accessibility_results, result)
-                
-                # Find and store clickable elements
-                clickable_elements = self.browser.store_clickable_elements()
-                self.stored_element_info = [
-                    {
-                        'text': elem['text'],
-                        'href': elem['href']
-                    } for elem in clickable_elements
-                ]
-                
-                self._process_accept_flow(provider, result)
-                return True
-            return False
-        except Exception as e:
-            self.errors.append(f"Error in accept flow: {str(e)}")
-            return False
-
-    def _process_landing_and_reject(self, url_result: URLResult, result: ConsentCheckResult) -> bool:
-        """Process landing state and reject flow with fresh browser"""
-        try:
-            # Visit URL again
-            if not self.browser.visit_url(url_result.destination_url):
-                self.errors.append(f"Failed to visit URL for reject flow: {url_result.destination_url}")
-                return False
-
-            provider, _ = self.browser.detect_cookie_banner()
-            if provider:
-                # Find same elements as in accept flow
-                stored_elements = []
-                for info in self.stored_element_info:
-                    try:
-                        element = self.browser.driver.find_element(By.XPATH, 
-                            f"//a[@href='{info['href']}'][text()='{info['text']}']")
-                        if element.is_displayed() and element.is_enabled():
-                            stored_elements.append({
-                                'element': element,
-                                'text': info['text'],
-                                'href': info['href']
-                            })
-                    except Exception:
-                        continue
-                
-                self.browser.stored_elements = stored_elements
-                self._process_reject_flow(provider, result)
-                return True
-            return False
-        except Exception as e:
-            self.errors.append(f"Error in reject flow: {str(e)}")
-            return False
-
-    def _process_landing_state(self, url_result: URLResult, result: ConsentCheckResult) -> bool:
-        """Process initial landing state"""
-        if not self.browser.visit_url(url_result.destination_url):
-            self.errors.append(f"Failed to visit URL: {url_result.destination_url}")
-            return False
-
-        # Get initial state
-        initial_state = self.browser.get_page_state()
-        result.page_landing["state"] = self._process_state(initial_state)
-        result.page_landing["timestamp"] = time.time()
-        return True
-
-    def _process_banner_detection(self, provider: CookieProviderSignature, 
-                                accessibility_results: Dict, 
-                                result: ConsentCheckResult) -> None:
-        """Process banner detection results"""
-        result.ccm_detection["banner_found"] = True
-        result.ccm_detection["provider_name"] = provider.provider_name
-        result.ccm_detection["accessibility_with_banner"] = accessibility_results["is_accessible"]
-        result.ccm_detection["accessibility_issues"] = accessibility_results.get("issues", [])
-
-        if accessibility_results and not accessibility_results["is_accessible"]:
-            self.errors.extend(accessibility_results["issues"])
-
-    def _process_accept_flow(self, provider: CookieProviderSignature, result: ConsentCheckResult) -> None:
-
-        """Process accept cookies flow and interactions"""
-        try:
-            print("Starting accept flow...")
-            
-            # Accept cookies
-            accept_success = self.browser.click_consent_button(provider, action='accept')
-            result.accept_flow["consent"]["action_performed"] = True
-            result.accept_flow["consent"]["action_successful"] = accept_success
-            print(f"Accept cookies action success: {accept_success}")
-
-            # Store found clickable elements
-            clickable_elements = self.browser.store_clickable_elements()
-            result.accept_flow["clickable_elements"] = [
-                {
-                    'text': elem['text'],
-                    'href': elem['href']
-                } for elem in clickable_elements
-            ]
-            print(f"Found {len(clickable_elements)} clickable elements")
-
-            # Perform interactions
-            interaction_results = self.browser.perform_interaction_sequence()
-            result.accept_flow["interactions"] = interaction_results
-            print("Completed interaction sequence")
-
-            # Get final state
-            final_state = self.browser.get_page_state()
-            result.accept_flow["final_state"] = self._process_state(final_state)
-            result.accept_flow["timestamp"] = time.time()
-            print("Accept flow completed")
-
-        except Exception as e:
-            error_msg = f"Error in accept flow: {str(e)}"
-            self.errors.append(error_msg)
-            print(error_msg)
-
-    def _process_reject_flow(self, provider: CookieProviderSignature, result: ConsentCheckResult) -> None:
-
-        """Process reject cookies flow and interactions"""
-        try:
-            print("Starting reject flow...")
-            
-            # Reject cookies
-            reject_success = self.browser.click_consent_button(provider, action='reject')
-            result.reject_flow["consent"]["action_performed"] = True
-            result.reject_flow["consent"]["action_successful"] = reject_success
-            print(f"Reject cookies action success: {reject_success}")
-
-            # Use same clickable elements from accept flow for consistency
-            if hasattr(self.browser, 'stored_elements'):
-                result.reject_flow["clickable_elements"] = [
-                    {
-                        'text': elem['text'],
-                        'href': elem['href']
-                    } for elem in self.browser.stored_elements
-                ]
-                print("Using stored elements from accept flow")
-
-                # Perform interactions
-                interaction_results = self.browser.perform_interaction_sequence()
-                result.reject_flow["interactions"] = interaction_results
-                print("Completed interaction sequence")
-            else:
-                error_msg = "No stored elements found for reject flow"
-                self.errors.append(error_msg)
-                print(error_msg)
-
-            # Get final state
-            final_state = self.browser.get_page_state()
-            result.reject_flow["final_state"] = self._process_state(final_state)
-            result.reject_flow["timestamp"] = time.time()
-            print("Reject flow completed")
-
-        except Exception as e:
-            error_msg = f"Error in reject flow: {str(e)}"
-            self.errors.append(error_msg)
-            print(error_msg)
+            return result
     
+    def _capture_pre_consent_state(self, url_result: URLResult, result: ConsentCheckResult) -> bool:
+
+        """
+        Capture complete pre-consent state including banner detection, accessibility,
+        page state and clickable elements
+        """
+        try:
+            # 1. Visit URL and wait for load
+            if not self.browser.visit_url(url_result.destination_url):
+                self.errors.append(f"Failed to visit URL: {url_result.destination_url}")
+                return False
+
+            # 2. Initial Page State Capture
+            initial_state = self.browser.get_page_state()
+            
+            # 3. Banner Detection (simplified)
+            provider = self.browser.detect_cookie_banner()
+            self.browser.current_provider = provider  # Store for later use
+            
+            # 4. Find meaningful clickable elements
+            clickable_elements = self.browser.find_meaningful_clickables(
+                limit=3,
+                current_url=url_result.destination_url,
+                banner_ids=provider.banner_ids if provider else None
+            )
+            # Store for later use in consent flows
+            self.stored_elements = clickable_elements
+            
+            result.ccm_detection.update({
+                "banner_found": provider is not None,
+                "provider_name": provider.provider_name if provider else "",
+            })
+
+            if provider:
+                # Perform accessibility checks
+                accessibility_results = self.browser.check_site_accessibility(clickable_elements)
+                
+                result.ccm_detection.update({
+                    "accessibility_with_banner": accessibility_results["is_accessible"],
+                    "can_scroll": accessibility_results["can_scroll"],
+                    "accessibility_issues": accessibility_results["issues"]
+                })
+
+                # Store accessibility issues if any
+                if not accessibility_results["is_accessible"]:
+                    self.errors.extend(accessibility_results["issues"])
+            
+            # 6. Update complete page landing state
+            result.page_landing.update({
+                "state": {
+                    "cookies": initial_state.cookies,
+                    "network_state": self._create_network_state(initial_state),
+                    "analytics_tags": initial_state.analytics_tags,
+                    "clickable_elements": [{
+                        'text': elem['text'],
+                        'href': elem['href'],
+                        'opens_new_tab': elem['opens_new_tab']
+                    } for elem in clickable_elements]
+                },
+                "timestamp": time.time()
+            })
+
+            # Success if we at least got the page state
+            return bool(initial_state)
+
+        except Exception as e:
+            self.errors.append(f"Error in pre-consent capture: {str(e)}")
+            return False
+    
+    def _capture_post_consent_state(self, provider: CookieProviderSignature, result: ConsentCheckResult, action: str) -> None:
+        try:
+            flow = result.accept_flow if action == 'accept' else result.reject_flow
+            
+            # Click consent button and capture result
+            consent_status = self.browser.click_consent_button(provider, action=action)
+            flow.consent = ConsentAction(
+                action_performed=True,
+                action_successful=consent_status['success'],
+                button_found=consent_status['button_found'],
+                error=consent_status['error'],
+                timestamp=time.time()
+            )
+
+            # Restore stored elements for this session
+            if consent_status['success'] and self.stored_elements:
+                # Prepare elements for current session
+                self.browser.restore_elements(self.stored_elements)
+                # Use BrowserManager's interaction sequence
+                flow.interactions = self.browser.perform_interaction_sequence()
+
+            # Capture final state
+            final_state = self.browser.get_page_state()
+            flow.network_state = self._create_network_state(final_state)
+            flow.cookies = final_state.cookies
+            flow.timestamp = time.time()
+
+        except Exception as e:
+            self.errors.append(f"Error in {action} flow: {str(e)}")
+
+    def _create_network_state(self, browser_state: BrowserState) -> NetworkState:
+        """Create network state from browser state"""
+        # Convert NetworkRequest objects to dictionaries
+        requests = [{
+            'url': req.url,
+            'initiator': req.initiator,
+            'timestamp': req.timestamp,
+            'request_id': req.request_id,
+            'is_third_party': req.is_third_party,
+            'domain': req.domain
+        } for req in browser_state.network_requests]
+
+        # Reconstruct request chains
+        chains = []
+        for req in browser_state.network_requests:
+            if req.initiator.get('type') == 'script':
+                chain = {
+                    'source': req.initiator.get('stack', {}).get('callFrames', [{}])[0].get('url', 'unknown'),
+                    'target': req.url,
+                    'type': 'script'
+                }
+                chains.append(chain)
+
+        return NetworkState(
+            requests=requests,
+            analytics_tags=browser_state.analytics_tags,
+            request_chains=chains
+        )
 
     def create_summary(self, result: ConsentCheckResult) -> Dict:
         """Create a summarized version of the consent check result"""
@@ -260,32 +273,181 @@ class DataCollectionService:
             'status': result.url_info['status_code'],
             'banner_found': result.ccm_detection['banner_found'],
             'provider': result.ccm_detection['provider_name'],
-            'accessible': result.ccm_detection['accessibility_with_banner'],
-            'accept_successful': result.accept_flow['consent']['action_successful'],
-            'reject_successful': result.reject_flow['consent']['action_successful'],
-            'initial_cookies': result.page_landing['state']['summary']['total_cookies'] if result.page_landing['state'] else 0,
-            'accept_cookies': result.accept_flow['final_state']['summary']['total_cookies'] if result.accept_flow['final_state'] else 0,
-            'reject_cookies': result.reject_flow['final_state']['summary']['total_cookies'] if result.reject_flow['final_state'] else 0,
+            'interactable_pre-consent': result.ccm_detection['accessibility_with_banner'],
+            'scrollable_pre-consent': result.ccm_detection["can_scroll"],
+            'accept_successful': result.accept_flow.consent.action_successful,
+            'reject_successful': result.reject_flow.consent.action_successful,
+            'initial_cookies': len(result.page_landing['state']['cookies']) if result.page_landing['state'] else 0,
+            'accept_cookies': len(result.accept_flow.cookies) if result.accept_flow.cookies else 0,
+            'reject_cookies': len(result.reject_flow.cookies) if result.reject_flow.cookies else 0,
             'has_errors': len(result.errors) > 0
         }
     
-    def _process_state(self, state: BrowserState) -> Dict:
-        """Process browser state into structured format"""
-        return {
-            "summary": {
-                "total_cookies": len(state.cookies),
-                "total_analytics_tags": len(state.analytics_tags),
-                "total_analytics_requests": len(state.network_requests)
+    def generate_cod_results(self, result: ConsentCheckResult, include_network_chains: bool = True) -> dict:
+        
+        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState) -> dict:
+            """Helper to analyze cookies and network requests"""
+            first_party_cookies = [c for c in state_cookies if not c.get('is_third_party', True)]
+            third_party_cookies = [c for c in state_cookies if c.get('is_third_party', False)]
+            third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
+            
+            analysis_dict = {
+                'noFirstPartyCookies': len(first_party_cookies) == 0,
+                'noThirdPartyCookies': len(third_party_cookies) == 0,
+                'noThirdPartyRequests': len(third_party_requests) == 0
+            }
+            
+            if include_network_chains:
+                analysis_dict['networkChains'] = state_network.request_chains
+                
+            return analysis_dict
+        
+        # Get pre-consent state
+        pre_consent_state = result.page_landing.get('state', {})
+        pre_consent_analysis = _analyze_cookies_and_requests(
+            pre_consent_state.get('cookies', []),
+            pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[]))
+        )
+        
+        # Get post-consent accept state
+        accept_analysis = _analyze_cookies_and_requests(
+            result.accept_flow.cookies,
+            result.accept_flow.network_state
+        )
+        
+        # Get post-consent reject state
+        reject_analysis = _analyze_cookies_and_requests(
+            result.reject_flow.cookies,
+            result.reject_flow.network_state
+        )
+        
+        # Build final analysis object
+        analysis = {
+            "url_info": {
+                "requested_url": result.url_info['requested_url'],
+                "final_url": result.url_info['final_url'],
+                "status_code": result.url_info['status_code'],
+                "domain": result.url_info['domain']
             },
-            "details": {
-                "cookies": state.cookies,
-                "analytics_tags": state.analytics_tags,
-                "network_requests": state.network_requests
+            "ccm_banner": {
+                "banner_found": result.ccm_detection['banner_found'],
+                "provider_name": result.ccm_detection['provider_name']
+            },
+            "preConsent": {
+                "pageNotInteractable": not result.ccm_detection['accessibility_with_banner'],
+                "pageScrollable": result.ccm_detection["can_scroll"],
+                "noFirstPartyCookies": pre_consent_analysis['noFirstPartyCookies'],
+                "noThirdPartyCookies": pre_consent_analysis['noThirdPartyCookies'],
+                "noThirdPartyRequests": pre_consent_analysis['noThirdPartyRequests']
+            },
+            "postConsent": {
+                "onAccept": {
+                    "noAdditionalFirstPartyCookies": accept_analysis['noFirstPartyCookies'],
+                    "noAdditionalThirdPartyCookies": accept_analysis['noThirdPartyCookies'],
+                    "noAdditionalThirdPartyRequests": accept_analysis['noThirdPartyRequests']
+                },
+                "onReject": {
+                    "noAdditionalFirstPartyCookies": reject_analysis['noFirstPartyCookies'],
+                    "noAdditionalThirdPartyCookies": reject_analysis['noThirdPartyCookies'],
+                    "noAdditionalThirdPartyRequests": reject_analysis['noThirdPartyRequests']
+                }
             }
         }
+        
+        # Add network chains data if requested
+        if include_network_chains:
+            analysis["preConsent"]["networkChains"] = pre_consent_analysis['networkChains']
+            analysis["postConsent"]["onAccept"]["networkChains"] = accept_analysis['networkChains']
+            analysis["postConsent"]["onReject"]["networkChains"] = reject_analysis['networkChains']
+        
+        return analysis
+    
+    def generate_consent_analysis0(self,result: ConsentCheckResult) -> dict:
+        """
+        Generate a structured analysis of consent mana gement behavior where all boolean values
+        are coded such that True indicates good/compliant behavior.
+        
+        Args:
+            result: ConsentCheckResult object containing raw data collection results
+            
+        Returns:
+            Dictionary containing structured analysis of consent behavior
+        """
+        
+        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState) -> dict:
+            """Helper to analyze cookies and network requests"""
+            first_party_cookies = [c for c in state_cookies if not c.get('is_third_party', True)]
+            third_party_cookies = [c for c in state_cookies if c.get('is_third_party', False)]
+            third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
+            
+            return {
+                'noFirstPartyCookies': len(first_party_cookies) == 0,
+                'noThirdPartyCookies': len(third_party_cookies) == 0,
+                'noThirdPartyRequests': len(third_party_requests) == 0,
+                'networkChains': state_network.request_chains
+            }
+        
+        # Get pre-consent state
+        pre_consent_state = result.page_landing.get('state', {})
+        pre_consent_analysis = _analyze_cookies_and_requests(
+            pre_consent_state.get('cookies', []),
+            pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[]))
+        )
+        
+        # Get post-consent accept state
+        accept_analysis = _analyze_cookies_and_requests(
+            result.accept_flow.cookies,
+            result.accept_flow.network_state
+        )
+        
+        # Get post-consent reject state
+        reject_analysis = _analyze_cookies_and_requests(
+            result.reject_flow.cookies,
+            result.reject_flow.network_state
+        )
+        
+        # Build final analysis object
+        analysis = {
+            "url_info": {
+                "requested_url": result.url_info['requested_url'],
+                "final_url": result.url_info['final_url'],
+                "status_code": result.url_info['status_code'],
+                "domain": result.url_info['domain']
+            },
+            "ccm_banner": {
+                "banner_found": result.ccm_detection['banner_found'],
+                "provider_name": result.ccm_detection['provider_name']
+            },
+            "preConsent": {
+                "pageNotInteractable": not result.ccm_detection['accessibility_with_banner'],
+                "pageScrollable": result.ccm_detection["can_scroll"],
+                "noFirstPartyCookies": pre_consent_analysis['noFirstPartyCookies'],
+                "noThirdPartyCookies": pre_consent_analysis['noThirdPartyCookies'],
+                "noThirdPartyRequests": pre_consent_analysis['noThirdPartyRequests'],
+                "networkChains": pre_consent_analysis['networkChains']
+            },
+            "postConsent": {
+                "onAccept": {
+                    "noAdditionalFirstPartyCookies": accept_analysis['noFirstPartyCookies'],
+                    "noAdditionalThirdPartyCookies": accept_analysis['noThirdPartyCookies'],
+                    "noAdditionalThirdPartyRequests": accept_analysis['noThirdPartyRequests'],
+                    "networkChains": accept_analysis['networkChains']
+                },
+                "onReject": {
+                    "noAdditionalFirstPartyCookies": reject_analysis['noFirstPartyCookies'],
+                    "noAdditionalThirdPartyCookies": reject_analysis['noThirdPartyCookies'],
+                    "noAdditionalThirdPartyRequests": reject_analysis['noThirdPartyRequests'],
+                    "networkChains": reject_analysis['networkChains']
+                }
+            }
+        }
+        
+        return analysis
 
     def _create_error_result(self, url_result: URLResult) -> ConsentCheckResult:
         """Create error result structure"""
         result = self._initialize_result(url_result)
         result.errors = self.errors
         return result
+    
+    
