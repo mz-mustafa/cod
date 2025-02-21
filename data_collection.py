@@ -301,7 +301,7 @@ class DataCollectionService:
         Returns:
             Dictionary containing analysis of cookie and request behavior
         """
-        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState) -> dict:
+        def _analyze_cookies_and_requests(state_cookies: list, state_network: NetworkState, stage: str) -> dict:
             """Analyze cookies and requests for a given state"""
             # Cookie classification
             first_party_cookies = [c for c in state_cookies if c.get('is_first_party', False)]
@@ -315,12 +315,12 @@ class DataCollectionService:
             
             k = CookieAnalysisKeys
             analysis_dict = {
-                k.FIRST_PARTY_COOKIES: len(first_party_cookies) > 0,
-                k.CCM_PROVIDER_COOKIES: len(ccm_provider_cookies) > 0,
-                k.NO_THIRD_PARTY_COOKIES: len(third_party_cookies) == 0,
-                k.FIRST_PARTY_REQUESTS: len(first_party_requests) > 0,
-                k.CCM_PROVIDER_REQUESTS: len(ccm_provider_requests) > 0,
-                k.NO_THIRD_PARTY_REQUESTS: len(third_party_requests) == 0
+                k.FIRST_PARTY_COOKIES: self.get_flag_metadata('FIRST_PARTY_COOKIES',len(first_party_cookies) > 0,stage),
+                k.CCM_PROVIDER_COOKIES: self.get_flag_metadata('CCM_PROVIDER_COOKIES',len(ccm_provider_cookies) > 0,stage),
+                k.NO_THIRD_PARTY_COOKIES: self.get_flag_metadata('NO_THIRD_PARTY_COOKIES',len(third_party_cookies) == 0,stage),
+                k.FIRST_PARTY_REQUESTS: self.get_flag_metadata('FIRST_PARTY_REQUESTS',len(first_party_requests) > 0,stage) ,
+                k.CCM_PROVIDER_REQUESTS: self.get_flag_metadata('CCM_PROVIDER_REQUESTS',len(ccm_provider_requests) > 0,stage) ,
+                k.NO_THIRD_PARTY_REQUESTS: self.get_flag_metadata('NO_THIRD_PARTY_REQUESTS',len(third_party_requests) == 0,stage) 
             }
             
             if include_network_chains:
@@ -332,17 +332,17 @@ class DataCollectionService:
         pre_consent_state = result.page_landing.get('state', {})
         pre_consent_analysis = _analyze_cookies_and_requests(
             pre_consent_state.get('cookies', []),
-            pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[]))
+            pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[])), 'pre-consent'
         )
         
         accept_analysis = _analyze_cookies_and_requests(
             result.accept_flow.cookies,
-            result.accept_flow.network_state
+            result.accept_flow.network_state, 'post-consent'
         )
         
         reject_analysis = _analyze_cookies_and_requests(
             result.reject_flow.cookies,
-            result.reject_flow.network_state
+            result.reject_flow.network_state, 'post_consent'
         )
         
         k = CookieAnalysisKeys
@@ -359,8 +359,14 @@ class DataCollectionService:
                 "provider_name": result.ccm_detection['provider_name']
             },
             "preConsent": {
-                k.PAGE_NOT_INTERACTABLE: not result.ccm_detection['accessibility_with_banner'],
-                k.PAGE_SCROLLABLE: result.ccm_detection["can_scroll"],
+                k.PAGE_NOT_INTERACTABLE: self.get_flag_metadata('PAGE_NOT_INTERACTABLE',
+                                                                not result.ccm_detection['accessibility_with_banner'],
+                                                                'pre-consent'
+                                                                ),
+                k.PAGE_SCROLLABLE: self.get_flag_metadata('PAGE_SCROLLABLE',
+                                                                result.ccm_detection["can_scroll"],
+                                                                'pre-consent'
+                                                                ),
                 k.FIRST_PARTY_COOKIES: pre_consent_analysis[k.FIRST_PARTY_COOKIES],
                 k.CCM_PROVIDER_COOKIES: pre_consent_analysis[k.CCM_PROVIDER_COOKIES],
                 k.NO_THIRD_PARTY_COOKIES: pre_consent_analysis[k.NO_THIRD_PARTY_COOKIES],
@@ -396,6 +402,143 @@ class DataCollectionService:
         
         return analysis
 
+
+    def get_flag_metadata(self,flag_name: str, value: bool, stage: str = 'pre-consent') -> dict:
+        """
+        Get the interpretation, meaning and outlook for a given flag and its value.
+        
+        Args:
+            flag_name: The name of the flag from CookieAnalysisKeys
+            value: The boolean value of the flag
+            stage: The consent stage ('pre-consent' or 'post-consent')
+            
+        Returns:
+            Dictionary containing flag value, interpretation, meaning and outlook
+        """
+        interpretations = {
+            'PAGE_NOT_INTERACTABLE': {
+                'interpretation': 'Users shouldn\'t be allowed to interact with page at pre-consent stage',
+                'stage': 'pre-consent',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'Users cannot interact with page before consent'
+                },
+                False: {
+                    'outlook': 'Negative',
+                    'meaning': 'Users can interact with page before consent'
+                }
+            },
+            'PAGE_SCROLLABLE': {
+                'interpretation': 'Page scrolling improves user experience while maintaining compliance',
+                'stage': 'pre-consent',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'Users can scroll the page, providing better UX'
+                },
+                False: {
+                    'outlook': 'Neutral',
+                    'meaning': 'Page scrolling is blocked'
+                }
+            },
+            'FIRST_PARTY_COOKIES': {
+                'interpretation': 'First party cookies are often essential for functionality. Individual cookies need to be verified to ensure compliance',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Neutral',
+                    'meaning': 'First party cookies present - individual verification needed'
+                },
+                False: {
+                    'outlook': 'Positive',
+                    'meaning': 'No first party cookies - minimal privacy impact'
+                }
+            },
+            'CCM_PROVIDER_COOKIES': {
+                'interpretation': 'Cookies are sometimes used by provider for CCM functionality',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'CMP cookies present and may be used for functionality'
+                },
+                False: {
+                    'outlook': 'Positive',
+                    'meaning': 'No CMP cookies - provider may use alternative methods'
+                }
+            },
+            'NO_THIRD_PARTY_COOKIES': {
+                'interpretation': 'Third party cookies should not be present without consent',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'No third party cookies detected'
+                },
+                False: {
+                    'outlook': 'Negative',
+                    'meaning': 'Third party cookies found'
+                }
+            },
+            'FIRST_PARTY_REQUESTS': {
+                'interpretation': 'First party script requests are typically needed for site functionality. Individual requests need to be checked to ensure compliance',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Neutral',
+                    'meaning': 'First party script requests present - individual verification needed'
+                },
+                False: {
+                    'outlook': 'Positive',
+                    'meaning': 'No first party script requests - minimal privacy impact'
+                }
+            },
+            'CCM_PROVIDER_REQUESTS': {
+                'interpretation': 'Script requests are expected for CCM functionality',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'CMP script requests present as expected'
+                },
+                False: {
+                    'outlook': 'Positive',
+                    'meaning': 'No CMP script requests - provider may use alternative methods'
+                }
+            },
+            'NO_THIRD_PARTY_REQUESTS': {
+                'interpretation': 'Third party script requests should not occur without consent',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'No third party script requests detected'
+                },
+                False: {
+                    'outlook': 'Negative',
+                    'meaning': 'Third party script requests found'
+                }
+            }
+        }
+        
+        if flag_name not in interpretations:
+            return {
+                'value': value,
+                'interpretation': 'No interpretation available',
+                'meaning': 'Unknown flag',
+                'outlook': 'Unknown'
+            }
+        
+        flag_info = interpretations[flag_name]
+        
+        # Check if flag is appropriate for current stage
+        if flag_info['stage'] != 'both' and flag_info['stage'] != stage:
+            return {
+                'value': value,
+                'interpretation': f'Flag not applicable in {stage} stage',
+                'meaning': 'Stage mismatch',
+                'outlook': 'Not Applicable'
+            }
+        
+        return {
+            'value': value,
+            'interpretation': flag_info['interpretation'],
+            'meaning': flag_info[value]['meaning'],
+            'outlook': flag_info[value]['outlook']
+        }
 
     def _create_error_result(self, url_result: URLResult) -> ConsentCheckResult:
         """Create error result structure"""
