@@ -19,6 +19,7 @@ class CookieAnalysisKeys:
     FIRST_PARTY_REQUESTS = 'firstPartyRequests'
     CCM_PROVIDER_REQUESTS = 'ccmProviderRequests'
     NO_THIRD_PARTY_REQUESTS = 'noThirdPartyRequests'
+    ANALYTICS_LIBRARY_LOADS = 'analyticsLibraryLoads'
     
     # Network
     NETWORK_CHAINS = 'networkChains'
@@ -268,6 +269,8 @@ class DataCollectionService:
             'is_third_party': req.is_third_party,
             'is_first_party': req.is_first_party,
             'is_ccm_provider': req.is_ccm_provider,
+            'is_analytics_library': req.is_analytics_library,
+            'analytics_provider': req.analytics_provider,
             'domain': req.domain
         } for req in browser_state.network_requests]
 
@@ -279,7 +282,9 @@ class DataCollectionService:
                     'source': req.initiator.get('stack', {}).get('callFrames', [{}])[0].get('url', 'unknown'),
                     'target': req.url,
                     'timestamp': req.timestamp,
-                    'type': 'script'
+                    'type': 'script',
+                    'is_analytics_library': req.is_analytics_library,
+                    'analytics_provider': req.analytics_provider
                 }
                 chains.append(chain)
 
@@ -312,15 +317,17 @@ class DataCollectionService:
             first_party_requests = [r for r in state_network.requests if r.get('is_first_party', False)]
             third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
             ccm_provider_requests = [r for r in state_network.requests if r.get('is_ccm_provider', False)]
+            analytics_library_loads = [r for r in state_network.requests if r.get('is_analytics_library', False)]
             
             k = CookieAnalysisKeys
             analysis_dict = {
                 k.FIRST_PARTY_COOKIES: self.get_flag_metadata('FIRST_PARTY_COOKIES',len(first_party_cookies) > 0,stage),
                 k.CCM_PROVIDER_COOKIES: self.get_flag_metadata('CCM_PROVIDER_COOKIES',len(ccm_provider_cookies) > 0,stage),
                 k.NO_THIRD_PARTY_COOKIES: self.get_flag_metadata('NO_THIRD_PARTY_COOKIES',len(third_party_cookies) == 0,stage),
-                k.FIRST_PARTY_REQUESTS: self.get_flag_metadata('FIRST_PARTY_REQUESTS',len(first_party_requests) > 0,stage) ,
-                k.CCM_PROVIDER_REQUESTS: self.get_flag_metadata('CCM_PROVIDER_REQUESTS',len(ccm_provider_requests) > 0,stage) ,
-                k.NO_THIRD_PARTY_REQUESTS: self.get_flag_metadata('NO_THIRD_PARTY_REQUESTS',len(third_party_requests) == 0,stage) 
+                k.FIRST_PARTY_REQUESTS: self.get_flag_metadata('FIRST_PARTY_REQUESTS',len(first_party_requests) > 0,stage),
+                k.CCM_PROVIDER_REQUESTS: self.get_flag_metadata('CCM_PROVIDER_REQUESTS',len(ccm_provider_requests) > 0,stage),
+                k.NO_THIRD_PARTY_REQUESTS: self.get_flag_metadata('NO_THIRD_PARTY_REQUESTS',len(third_party_requests) == 0,stage),
+                k.ANALYTICS_LIBRARY_LOADS: self.get_flag_metadata('ANALYTICS_LIBRARY_LOADS',len(analytics_library_loads) > 0,stage)
             }
             
             if include_network_chains:
@@ -372,7 +379,8 @@ class DataCollectionService:
                 k.NO_THIRD_PARTY_COOKIES: pre_consent_analysis[k.NO_THIRD_PARTY_COOKIES],
                 k.FIRST_PARTY_REQUESTS: pre_consent_analysis[k.FIRST_PARTY_REQUESTS],
                 k.CCM_PROVIDER_REQUESTS: pre_consent_analysis[k.CCM_PROVIDER_REQUESTS],
-                k.NO_THIRD_PARTY_REQUESTS: pre_consent_analysis[k.NO_THIRD_PARTY_REQUESTS]
+                k.NO_THIRD_PARTY_REQUESTS: pre_consent_analysis[k.NO_THIRD_PARTY_REQUESTS],
+                k.ANALYTICS_LIBRARY_LOADS: pre_consent_analysis[k.ANALYTICS_LIBRARY_LOADS]
             },
             "postConsent": {
                 "onAccept": {
@@ -381,7 +389,8 @@ class DataCollectionService:
                     k.NO_THIRD_PARTY_COOKIES: accept_analysis[k.NO_THIRD_PARTY_COOKIES],
                     k.FIRST_PARTY_REQUESTS: accept_analysis[k.FIRST_PARTY_REQUESTS],
                     k.CCM_PROVIDER_REQUESTS: accept_analysis[k.CCM_PROVIDER_REQUESTS],
-                    k.NO_THIRD_PARTY_REQUESTS: accept_analysis[k.NO_THIRD_PARTY_REQUESTS]
+                    k.NO_THIRD_PARTY_REQUESTS: accept_analysis[k.NO_THIRD_PARTY_REQUESTS],
+                    k.ANALYTICS_LIBRARY_LOADS: accept_analysis[k.ANALYTICS_LIBRARY_LOADS]
                 },
                 "onReject": {
                     k.FIRST_PARTY_COOKIES: reject_analysis[k.FIRST_PARTY_COOKIES],
@@ -389,7 +398,8 @@ class DataCollectionService:
                     k.NO_THIRD_PARTY_COOKIES: reject_analysis[k.NO_THIRD_PARTY_COOKIES],
                     k.FIRST_PARTY_REQUESTS: reject_analysis[k.FIRST_PARTY_REQUESTS],
                     k.CCM_PROVIDER_REQUESTS: reject_analysis[k.CCM_PROVIDER_REQUESTS],
-                    k.NO_THIRD_PARTY_REQUESTS: reject_analysis[k.NO_THIRD_PARTY_REQUESTS]
+                    k.NO_THIRD_PARTY_REQUESTS: reject_analysis[k.NO_THIRD_PARTY_REQUESTS],
+                    k.ANALYTICS_LIBRARY_LOADS: reject_analysis[k.ANALYTICS_LIBRARY_LOADS]
                 }
             }
         }
@@ -510,6 +520,18 @@ class DataCollectionService:
                 False: {
                     'outlook': 'Negative',
                     'meaning': 'Third party script requests found'
+                }
+            },
+            'ANALYTICS_LIBRARY_LOADS': {
+                'interpretation': 'Analytics library loads are acceptable',
+                'stage': 'both',
+                True: {
+                    'outlook': 'Positive',
+                    'meaning': 'Analytics libraries or containers load through Javascript script execution. The loading event alone does not create a compliance problem.'
+                },
+                False: {
+                    'outlook': 'Neutral',
+                    'meaning': 'No analytics library loads detected'
                 }
             }
         }

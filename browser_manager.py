@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
@@ -24,6 +25,8 @@ class NetworkRequest:
         self.is_third_party = None
         self.is_first_party = None
         self.is_ccm_provider = None
+        self.is_analytics_library = None
+        self.analytics_provider = None
 
 class BrowserState:
     """Enhanced browser state information"""
@@ -35,8 +38,8 @@ class BrowserState:
 
     def classify_parties(self, page_domain: str, provider: CookieProviderSignature):
         """
-        Classify cookies and requests with all three party flags:
-        is_ccm_provider, is_first_party, is_third_party
+        Classify cookies and requests with all flags:
+        is_ccm_provider, is_first_party, is_third_party, is_analytics_library
         
         Args:
             page_domain: Domain of the current page
@@ -73,6 +76,9 @@ class BrowserState:
                 cookie['is_first_party'] = False
                 cookie['is_third_party'] = True
             
+        # Get a reference to the provider registry to check analytics providers
+        provider_registry = getattr(provider, '_registry', None)
+        
         # Classify network requests
         for request in self.network_requests:
             try:
@@ -83,21 +89,50 @@ class BrowserState:
                     request.is_ccm_provider = True
                     request.is_first_party = False
                     request.is_third_party = False
+                    request.is_analytics_library = False
                 # Then check if it's first party
                 elif request_base_domain == base_domain:
                     request.is_ccm_provider = False
                     request.is_first_party = True
                     request.is_third_party = False
-                # Otherwise it's third party
+                    request.is_analytics_library = False
+                # Otherwise it's third party, but might be an analytics library
                 else:
                     request.is_ccm_provider = False
                     request.is_first_party = False
-                    request.is_third_party = True
+                    
+                    # Check if this is an analytics library request
+                    if provider_registry:
+                        # Use the improved detection methods
+                        lib_results = provider_registry.is_analytics_library_load(request.url, request.domain)
+                        is_library = any(lib_results.values())
+                        
+                        if is_library:
+                            # Find which provider matched
+                            for provider_key, matched in lib_results.items():
+                                if matched:
+                                    provider = provider_registry._analytics_providers.get(provider_key)
+                                    if provider:
+                                        request.analytics_provider = provider.provider_name
+                                        break
+                        
+                        request.is_analytics_library = is_library
+                        
+                        # If it's an analytics library, it's not considered a regular third-party request
+                        if is_library:
+                            request.is_third_party = False
+                        else:
+                            request.is_third_party = True
+                    else:
+                        request.is_analytics_library = False
+                        request.is_third_party = True
+                        
             except Exception:
                 # If domain parsing fails, consider it third party
                 request.is_ccm_provider = False
                 request.is_first_party = False
                 request.is_third_party = True
+                request.is_analytics_library = False
 
     def _get_base_domain(self, domain: str) -> str:
         """Extract base domain from domain string"""
@@ -125,8 +160,8 @@ class BrowserManager:
         options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
         options.add_experimental_option('perfLoggingPrefs', {
             'enableNetwork': True,
-            'enablePage': True,
-            'traceCategories': 'browser,devtools.timeline,devtools'
+            #'enablePage': True,
+            #'traceCategories': 'browser,devtools.timeline,devtools'
         })
         
         self.driver = webdriver.Chrome(options=options)
@@ -260,6 +295,9 @@ class BrowserManager:
             provider = self.provider_registry.get_provider(page_source)
             
             if provider:
+                # Attach provider registry to the provider instance for analytics detection
+                provider._registry = self.provider_registry
+                
                 # Verify banner is actually present in DOM
                 for banner_id in provider.banner_ids:
                     try:
