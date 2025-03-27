@@ -17,10 +17,10 @@ class CookieProviderSignature:
 class AnalyticsProviderSignature:
     """Signature structure for analytics providers"""
     provider_name: str                # Name of the analytics provider
-    library_domains: List[str]        # Base domains for library loading
-    library_url_patterns: List[str]   # URL patterns to match library loads
+    container_domains: List[str]        # Base domains for container loading
+    container_url_patterns: List[str]   # URL patterns to match container loads
     event_domains: List[str]          # Base domains for analytics events
-    event_url_patterns: List[str]     # URL patterns to match analytics events (not libraries)
+    event_url_patterns: List[str]     # URL patterns to match analytics events (not containers)
 
 class TrustArcSignature(CookieProviderSignature):
     """TrustArc specific signature implementation"""
@@ -80,8 +80,8 @@ class GoogleAnalyticsSignature(AnalyticsProviderSignature):
     def __init__(self):
         super().__init__(
             provider_name="Google Analytics",
-            library_domains=["google-analytics.com", "googletagmanager.com"],
-            library_url_patterns=[
+            container_domains=["google-analytics.com", "googletagmanager.com"],
+            container_url_patterns=[
                 r"google-analytics\.com\/analytics\.js$",
                 r"googletagmanager\.com\/gtag\/js",
                 r"googletagmanager\.com\/gtm\.js"
@@ -101,8 +101,8 @@ class AdobeAnalyticsSignature(AnalyticsProviderSignature):
     def __init__(self):
         super().__init__(
             provider_name="Adobe Analytics",
-            library_domains=["adobetc.com", "adobedtm.com", "omtrdc.net"],
-            library_url_patterns=[
+            container_domains=["adobetc.com", "adobedtm.com", "omtrdc.net"],
+            container_url_patterns=[
                 r"assets\.adobetc\.com\/.*\.js$",
                 r"assets\.adobedtm\.com\/.*\.js$",
                 r"launch-.*\.adobedtm\.com.*\.js$"
@@ -171,9 +171,9 @@ class ProviderRegistry:
                 
         return None
     
-    def is_analytics_library_load(self, url: str, domain: str) -> Dict[str, bool]:
+    def is_analytics_container_load(self, url: str, domain: str) -> Dict[str, bool]:
         """
-        Check if a URL matches known analytics library load patterns.
+        Check if a URL matches known analytics container load patterns.
         
         Args:
             url: URL to check
@@ -184,14 +184,14 @@ class ProviderRegistry:
         """
         results = {}
         for provider_key, provider in self._analytics_providers.items():
-            # First check if the domain is in library domains
-            if any(library_domain in domain for library_domain in provider.library_domains):
-                # Then check if URL matches any library pattern (not event pattern)
-                is_library = any(re.search(pattern, url) for pattern in provider.library_url_patterns)
+            # First check if the domain is in container domains
+            if any(container_domain in domain for container_domain in provider.container_domains):
+                # Then check if URL matches any container pattern (not event pattern)
+                is_container = any(re.search(pattern, url) for pattern in provider.container_url_patterns)
                 # Check that it's not an event URL pattern
                 is_not_event = not any(re.search(pattern, url) for pattern in provider.event_url_patterns)
                 
-                results[provider_key] = is_library and is_not_event
+                results[provider_key] = is_container and is_not_event
             else:
                 results[provider_key] = False
             
@@ -232,8 +232,8 @@ class ProviderRegistry:
             The matching analytics provider signature or None
         """
         for provider in self._analytics_providers.values():
-            # Check library domains
-            if any(library_domain in domain for library_domain in provider.library_domains):
+            # Check container domains
+            if any(container_domain in domain for container_domain in provider.container_domains):
                 return provider
             # Check event domains
             if any(event_domain in domain for event_domain in provider.event_domains):

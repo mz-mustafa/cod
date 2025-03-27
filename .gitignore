@@ -7,3 +7,5 @@ __pycache__/
 temp.py
 tester.py
 temp_for_AIO.py
+*.tag
+*.html

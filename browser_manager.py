@@ -25,8 +25,9 @@ class NetworkRequest:
         self.is_third_party = None
         self.is_first_party = None
         self.is_ccm_provider = None
-        self.is_analytics_library = None
+        self.is_analytics_container = None
         self.analytics_provider = None
+        self.sets_cookies = []
 
 class BrowserState:
     """Enhanced browser state information"""
@@ -39,7 +40,7 @@ class BrowserState:
     def classify_parties(self, page_domain: str, provider: CookieProviderSignature):
         """
         Classify cookies and requests with all flags:
-        is_ccm_provider, is_first_party, is_third_party, is_analytics_library
+        is_ccm_provider, is_first_party, is_third_party, is_analytics_container
         
         Args:
             page_domain: Domain of the current page
@@ -89,42 +90,42 @@ class BrowserState:
                     request.is_ccm_provider = True
                     request.is_first_party = False
                     request.is_third_party = False
-                    request.is_analytics_library = False
+                    request.is_analytics_container = False
                 # Then check if it's first party
                 elif request_base_domain == base_domain:
                     request.is_ccm_provider = False
                     request.is_first_party = True
                     request.is_third_party = False
-                    request.is_analytics_library = False
-                # Otherwise it's third party, but might be an analytics library
+                    request.is_analytics_container = False
+                # Otherwise it's third party, but might be an analytics container
                 else:
                     request.is_ccm_provider = False
                     request.is_first_party = False
                     
-                    # Check if this is an analytics library request
+                    # Check if this is an analytics container request
                     if provider_registry:
                         # Use the improved detection methods
-                        lib_results = provider_registry.is_analytics_library_load(request.url, request.domain)
-                        is_library = any(lib_results.values())
+                        container_results = provider_registry.is_analytics_container_load(request.url, request.domain)
+                        is_container = any(container_results.values())
                         
-                        if is_library:
+                        if is_container:
                             # Find which provider matched
-                            for provider_key, matched in lib_results.items():
+                            for provider_key, matched in container_results.items():
                                 if matched:
                                     provider = provider_registry._analytics_providers.get(provider_key)
                                     if provider:
                                         request.analytics_provider = provider.provider_name
                                         break
                         
-                        request.is_analytics_library = is_library
+                        request.is_analytics_container = is_container
                         
-                        # If it's an analytics library, it's not considered a regular third-party request
-                        if is_library:
+                        # If it's an analytics container, it's not considered a regular third-party request
+                        if is_container:
                             request.is_third_party = False
                         else:
                             request.is_third_party = True
                     else:
-                        request.is_analytics_library = False
+                        request.is_analytics_container = False
                         request.is_third_party = True
                         
             except Exception:
@@ -132,8 +133,29 @@ class BrowserState:
                 request.is_ccm_provider = False
                 request.is_first_party = False
                 request.is_third_party = True
-                request.is_analytics_library = False
+                request.is_analytics_container = False
 
+        # Add classification for cookies set by network requests
+        for request in self.network_requests:
+            for cookie in request.sets_cookies:
+                cookie_domain = cookie.get('domain', '').lstrip('.')
+                try:
+                    cookie_base_domain = get_fld(cookie_domain, fix_protocol=True)
+                    
+                    # First check if it's a CCM provider domain
+                    if provider_base_domain and cookie_base_domain == provider_base_domain:
+                        cookie['type'] = 'ccm_provider'
+                    # Then check if it's first party
+                    elif cookie_base_domain == base_domain:
+                        cookie['type'] = 'first_party'
+                    # Otherwise it's third party
+                    else:
+                        cookie['type'] = 'third_party'
+                except Exception:
+                    # If domain parsing fails, consider it third party
+                    cookie['type'] = 'third_party'
+    
+    
     def _get_base_domain(self, domain: str) -> str:
         """Extract base domain from domain string"""
         parts = domain.split('.')
@@ -167,6 +189,7 @@ class BrowserManager:
         self.driver = webdriver.Chrome(options=options)
         # Enable detailed network monitoring
         self.driver.execute_cdp_cmd('Network.enable', {})
+        self.request_cookie_map = {}
         
     def visit_url(self, url: str) -> bool:
         """Visit URL and set current domain"""
@@ -184,68 +207,87 @@ class BrowserManager:
             return False
             
     def get_page_state(self, provider) -> BrowserState:
-
-        """Capture enhanced page state"""
+        """Capture enhanced page state with JavaScript cookie detection"""
         state = BrowserState()
         
         try:
+            # Capture initial cookies before page interactions
+            initial_cookie_cmd = self.driver.execute_cdp_cmd('Network.getAllCookies', {})
+            initial_cookies = initial_cookie_cmd.get('cookies', [])
+            initial_cookie_map = {f"{c.get('name')}@{c.get('domain')}": c for c in initial_cookies}
+            
+            print(f"Initial cookies count: {len(initial_cookies)}")
+            
             # Wait for potential dynamic cookie setting
             time.sleep(2)
             
-            # Get cookies using CDP
-            cdp_cookies = self.driver.execute_cdp_cmd('Network.getAllCookies', {})
+            # Get cookies after page load/wait
+            final_cookie_cmd = self.driver.execute_cdp_cmd('Network.getAllCookies', {})
+            final_cookies = final_cookie_cmd.get('cookies', [])
+            
+            print(f"Final cookies count: {len(final_cookies)}")
             
             # Normalize CDP cookie format to match Selenium format
             normalized_cookies = []
-            for cookie in cdp_cookies.get('cookies', []):
+            for cookie in final_cookies:
                 normalized_cookie = {
                     'name': cookie.get('name'),
                     'value': cookie.get('value'),
                     'domain': cookie.get('domain'),
                     'path': cookie.get('path'),
-                    'expiry': cookie.get('expires'),  # CDP 'expires' -> Selenium 'expiry'
+                    'expiry': cookie.get('expires'),
                     'secure': cookie.get('secure', False),
                     'httpOnly': cookie.get('httpOnly', False),
                     'sameSite': cookie.get('sameSite', 'None')
                 }
                 normalized_cookies.append(normalized_cookie)
-                
+                    
             state.cookies = normalized_cookies
             
             # Get analytics tags
             state.analytics_tags = self._check_analytics_tags()
             
-            # Get network requests with chain information
+            # Get network requests with the original method (not the debug version)
             state.network_requests = self._get_network_requests()
             
-            # Classify everything as first/third party
+            # Identify new cookies (set via JavaScript)
+            new_cookies = []
+            for cookie in final_cookies:
+                cookie_key = f"{cookie.get('name')}@{cookie.get('domain')}"
+                if cookie_key not in initial_cookie_map:
+                    new_cookies.append({
+                        'name': cookie.get('name'),
+                        'domain': cookie.get('domain'),
+                        'type': None
+                    })
+                    print(f"New cookie detected: {cookie.get('name')} for domain {cookie.get('domain')}")
+            
+            # If there are no new cookies, but we still want to associate cookies with requests
+            if not new_cookies:
+                print("No new cookies detected, associating existing cookies with relevant requests...")
+                for cookie in normalized_cookies:
+                    cookie_domain = cookie.get('domain', '').lstrip('.')
+                    for req in state.network_requests:
+                        req_domain = req.domain
+                        if (req_domain.endswith(cookie_domain) or cookie_domain.endswith(req_domain)):
+                            # Avoid duplicate entries
+                            cookie_entry = {
+                                'name': cookie.get('name'),
+                                'domain': cookie_domain,
+                                'type': None
+                            }
+                            if not any(c.get('name') == cookie.get('name') for c in req.sets_cookies):
+                                req.sets_cookies.append(cookie_entry)
+            
+            # Classify everything
             if self.current_page_domain:
                 state.classify_parties(self.current_page_domain, provider)
-            
+                
         except Exception as e:
             print(f"Error capturing page state: {str(e)}")
-            
+                
         return state
     
-    #SUPERSEDED BY get_page_state
-    def get_page_state0(self) -> BrowserState:
-        """Capture enhanced page state"""
-        state = BrowserState()
-        
-        # Get cookies with domain classification
-        state.cookies = self.driver.get_cookies()
-        
-        # Get analytics tags
-        state.analytics_tags = self._check_analytics_tags()
-        
-        # Get network requests with chain information
-        state.network_requests = self._get_network_requests()
-        
-        # Classify everything as first/third party
-        if self.current_page_domain:
-            state.classify_parties(self.current_page_domain)
-        
-        return state
     
     def _get_network_requests(self) -> List[NetworkRequest]:
         """Enhanced network request capture with chain information"""
@@ -272,9 +314,59 @@ class BrowserManager:
                     )
                     
                     network_requests.append(request)
+                    # Store for cookie correlation
+                    self.request_cookie_map[params['requestId']] = request
                     
             except Exception as e:
                 print(f"Error processing network log: {str(e)}")
+        
+        # Second pass: Find Set-Cookie headers in responses
+        for entry in self.network_logs:
+            try:
+                network_log = json.loads(entry['message'])['message']
+                
+                if network_log['method'] == 'Network.responseReceived':
+                    params = network_log['params']
+                    request_id = params['requestId']
+                    
+                    # If we have this request in our map
+                    if request_id in self.request_cookie_map:
+                        request = self.request_cookie_map[request_id]
+                        
+                        # Look for Set-Cookie headers
+                        if 'response' in params and 'headers' in params['response']:
+                            headers = params['response']['headers']
+                            cookies_set = []
+                            
+                            # Handle uppercase and lowercase header names
+                            for header_name in ['Set-Cookie', 'set-cookie']:
+                                if header_name in headers:
+                                    cookie_headers = headers[header_name]
+                                    # Convert to list if single string
+                                    if isinstance(cookie_headers, str):
+                                        cookie_headers = [cookie_headers]
+                                        
+                                    for cookie_header in cookie_headers:
+                                        try:
+                                            # Parse the cookie
+                                            cookie_parts = cookie_header.split(';')[0].split('=', 1)
+                                            cookie_name = cookie_parts[0].strip()
+                                            cookie_domain = self._extract_domain_from_cookie(cookie_header, request.domain)
+                                            
+                                            cookies_set.append({
+                                                'name': cookie_name,
+                                                'domain': cookie_domain,
+                                                # We'll set type later in classify_parties
+                                                'type': None
+                                            })
+                                        except Exception as e:
+                                            print(f"Error parsing cookie: {str(e)}")
+                                            
+                            # Store cookies with this request
+                            request.sets_cookies = cookies_set
+            
+            except Exception as e:
+                print(f"Error processing response log: {str(e)}")
                 
         return network_requests
 
@@ -311,7 +403,13 @@ class BrowserManager:
         except Exception as e:
             print(f"Error detecting provider: {str(e)}")
             return None
-        
+    
+    def _extract_domain_from_cookie(self, cookie_header: str, default_domain: str) -> str:
+        """Extract domain from cookie header or use default"""
+        domain_match = re.search(r'domain=([^;]+)', cookie_header, re.IGNORECASE)
+        if domain_match:
+            return domain_match.group(1).strip()
+        return default_domain
     
     def find_meaningful_clickables(self, limit: int, current_url: str, banner_ids: Optional[List[str]] = None) -> List[Dict]:
         """

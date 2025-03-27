@@ -19,7 +19,7 @@ class CookieAnalysisKeys:
     FIRST_PARTY_REQUESTS = 'firstPartyRequests'
     CCM_PROVIDER_REQUESTS = 'ccmProviderRequests'
     NO_THIRD_PARTY_REQUESTS = 'noThirdPartyRequests'
-    ANALYTICS_LIBRARY_LOADS = 'analyticsLibraryLoads'
+    ANALYTICS_CONTAINER_LOADS = 'analyticsContainerLoads'
     
     # Network
     NETWORK_CHAINS = 'networkChains'
@@ -269,9 +269,10 @@ class DataCollectionService:
             'is_third_party': req.is_third_party,
             'is_first_party': req.is_first_party,
             'is_ccm_provider': req.is_ccm_provider,
-            'is_analytics_library': req.is_analytics_library,
+            'is_analytics_container': req.is_analytics_container,
             'analytics_provider': req.analytics_provider,
-            'domain': req.domain
+            'domain': req.domain,
+            'sets_cookies': req.sets_cookies if hasattr(req, 'sets_cookies') else None
         } for req in browser_state.network_requests]
 
         # Reconstruct request chains
@@ -283,8 +284,9 @@ class DataCollectionService:
                     'target': req.url,
                     'timestamp': req.timestamp,
                     'type': 'script',
-                    'is_analytics_library': req.is_analytics_library,
-                    'analytics_provider': req.analytics_provider
+                    'is_analytics_container': req.is_analytics_container,
+                    'analytics_provider': req.analytics_provider,
+                    'sets_cookies': req.sets_cookies if hasattr(req, 'sets_cookies') else None
                 }
                 chains.append(chain)
 
@@ -294,7 +296,61 @@ class DataCollectionService:
             request_chains=chains
         )
 
-    
+    @staticmethod
+    def generate_cookie_summary(cookies: list) -> dict:
+        """
+        Generate a structured summary of cookie statistics from a list of cookies.
+        
+        Args:
+            cookies: List of cookie dictionaries
+            
+        Returns:
+            Dictionary with cookie statistics and interpretations
+        """
+        # Initialize counters
+        total_cookies = len(cookies)
+        first_party_cookies = sum(1 for c in cookies if c.get('is_first_party', False))
+        third_party_cookies = sum(1 for c in cookies if c.get('is_third_party', False))
+        ccm_provider_cookies = sum(1 for c in cookies if c.get('is_ccm_provider', False))
+        
+        secure_cookies = sum(1 for c in cookies if c.get('secure', False))
+        nonsecure_cookies = total_cookies - secure_cookies
+        
+        httponly_cookies = sum(1 for c in cookies if c.get('httpOnly', False))
+        non_httponly_cookies = total_cookies - httponly_cookies
+        
+        # Count SameSite values
+        samesite_blank = sum(1 for c in cookies if not c.get('sameSite'))
+        samesite_set = total_cookies - samesite_blank
+        
+        # Build the summary structure
+        summary = {
+            "parties": {
+                "num_total_cookies": total_cookies,
+                "num_first_party_cookies": first_party_cookies,
+                "num_ccm_provider_cookies": ccm_provider_cookies,
+                "num_third_party_cookies": third_party_cookies,
+                "interpretation": "Third party cookies should not be set before consent. Also, some browsers block third party cookies by default. Dependence on third party cookies should therefore be minimised."
+            },
+            "security": {
+                "num_secure_cookies": secure_cookies,
+                "num_nonsecure_cookies": nonsecure_cookies,
+                "interpretation": "Secure cookies are only sent over HTTPS connections, protecting them from interception. Not all cookies require the secure flag but cookies containing sensitive data or session identifiers should use it to prevent man-in-the-middle attacks."
+            },
+            "samesite": {
+                "num_samesite_blank": samesite_blank,
+                "num_samesite_set": samesite_set,
+                "interpretation": "Cookies should specify a SameSite attribute to protect against cross-site request forgery (CSRF) attacks. Modern browsers default to 'Lax' for cookies without a specified SameSite value, but explicitly setting this attribute is recommended for better cross-browser security and to prepare for future browser security changes."
+            },
+            "httponly": {
+                "num_httponly_cookies": httponly_cookies,
+                "num_non_httponly_cookies": non_httponly_cookies,
+                "interpretation": "HttpOnly cookies cannot be accessed by JavaScript, protecting against XSS attacks. Session and authentication cookies should use HttpOnly, while cookies needed by client-side scripts should not. A mix of both types is normal, but security-critical cookies should be HttpOnly."
+            }
+        }
+        
+        return summary
+
     def generate_cod_results(self, result: ConsentCheckResult, include_network_chains: bool = True) -> dict:
         """
         Generate structured analysis of cookie and request behavior across consent states.
@@ -317,7 +373,7 @@ class DataCollectionService:
             first_party_requests = [r for r in state_network.requests if r.get('is_first_party', False)]
             third_party_requests = [r for r in state_network.requests if r.get('is_third_party', False)]
             ccm_provider_requests = [r for r in state_network.requests if r.get('is_ccm_provider', False)]
-            analytics_library_loads = [r for r in state_network.requests if r.get('is_analytics_library', False)]
+            analytics_container_loads = [r for r in state_network.requests if r.get('is_analytics_container', False)]
             
             k = CookieAnalysisKeys
             analysis_dict = {
@@ -327,7 +383,7 @@ class DataCollectionService:
                 k.FIRST_PARTY_REQUESTS: self.get_flag_metadata('FIRST_PARTY_REQUESTS',len(first_party_requests) > 0,stage),
                 k.CCM_PROVIDER_REQUESTS: self.get_flag_metadata('CCM_PROVIDER_REQUESTS',len(ccm_provider_requests) > 0,stage),
                 k.NO_THIRD_PARTY_REQUESTS: self.get_flag_metadata('NO_THIRD_PARTY_REQUESTS',len(third_party_requests) == 0,stage),
-                k.ANALYTICS_LIBRARY_LOADS: self.get_flag_metadata('ANALYTICS_LIBRARY_LOADS',len(analytics_library_loads) > 0,stage)
+                k.ANALYTICS_CONTAINER_LOADS: self.get_flag_metadata('ANALYTICS_CONTAINER_LOADS',len(analytics_container_loads) > 0,stage)
             }
             
             if include_network_chains:
@@ -337,20 +393,25 @@ class DataCollectionService:
         
         # Get states for different phases
         pre_consent_state = result.page_landing.get('state', {})
+        pre_consent_cookies = pre_consent_state.get('cookies', [])
         pre_consent_analysis = _analyze_cookies_and_requests(
             pre_consent_state.get('cookies', []),
             pre_consent_state.get('network_state', NetworkState(requests=[], analytics_tags=[], request_chains=[])), 'pre-consent'
         )
-        
+        accept_cookies = result.accept_flow.cookies
         accept_analysis = _analyze_cookies_and_requests(
             result.accept_flow.cookies,
             result.accept_flow.network_state, 'post-consent'
         )
-        
+        reject_cookies = result.reject_flow.cookies
         reject_analysis = _analyze_cookies_and_requests(
             result.reject_flow.cookies,
             result.reject_flow.network_state, 'post_consent'
         )
+        # Generate cookie summaries for each phase
+        pre_consent_cookie_summary = self.generate_cookie_summary(pre_consent_cookies)
+        accept_cookie_summary = self.generate_cookie_summary(accept_cookies)
+        reject_cookie_summary = self.generate_cookie_summary(reject_cookies)
         
         k = CookieAnalysisKeys
         # Build final analysis object
@@ -380,7 +441,8 @@ class DataCollectionService:
                 k.FIRST_PARTY_REQUESTS: pre_consent_analysis[k.FIRST_PARTY_REQUESTS],
                 k.CCM_PROVIDER_REQUESTS: pre_consent_analysis[k.CCM_PROVIDER_REQUESTS],
                 k.NO_THIRD_PARTY_REQUESTS: pre_consent_analysis[k.NO_THIRD_PARTY_REQUESTS],
-                k.ANALYTICS_LIBRARY_LOADS: pre_consent_analysis[k.ANALYTICS_LIBRARY_LOADS]
+                k.ANALYTICS_CONTAINER_LOADS: pre_consent_analysis[k.ANALYTICS_CONTAINER_LOADS],
+                "cookie_summary": pre_consent_cookie_summary
             },
             "postConsent": {
                 "onAccept": {
@@ -390,7 +452,8 @@ class DataCollectionService:
                     k.FIRST_PARTY_REQUESTS: accept_analysis[k.FIRST_PARTY_REQUESTS],
                     k.CCM_PROVIDER_REQUESTS: accept_analysis[k.CCM_PROVIDER_REQUESTS],
                     k.NO_THIRD_PARTY_REQUESTS: accept_analysis[k.NO_THIRD_PARTY_REQUESTS],
-                    k.ANALYTICS_LIBRARY_LOADS: accept_analysis[k.ANALYTICS_LIBRARY_LOADS]
+                    k.ANALYTICS_CONTAINER_LOADS: accept_analysis[k.ANALYTICS_CONTAINER_LOADS],
+                    "cookie_summary": accept_cookie_summary
                 },
                 "onReject": {
                     k.FIRST_PARTY_COOKIES: reject_analysis[k.FIRST_PARTY_COOKIES],
@@ -399,7 +462,8 @@ class DataCollectionService:
                     k.FIRST_PARTY_REQUESTS: reject_analysis[k.FIRST_PARTY_REQUESTS],
                     k.CCM_PROVIDER_REQUESTS: reject_analysis[k.CCM_PROVIDER_REQUESTS],
                     k.NO_THIRD_PARTY_REQUESTS: reject_analysis[k.NO_THIRD_PARTY_REQUESTS],
-                    k.ANALYTICS_LIBRARY_LOADS: reject_analysis[k.ANALYTICS_LIBRARY_LOADS]
+                    k.ANALYTICS_CONTAINER_LOADS: reject_analysis[k.ANALYTICS_CONTAINER_LOADS],
+                    "cookie_summary": reject_cookie_summary
                 }
             }
         }
@@ -522,16 +586,16 @@ class DataCollectionService:
                     'meaning': 'Third party script requests found'
                 }
             },
-            'ANALYTICS_LIBRARY_LOADS': {
-                'interpretation': 'Analytics library loads are acceptable',
+            'ANALYTICS_CONTAINER_LOADS': {
+                'interpretation': 'Analytics Container loads are acceptable',
                 'stage': 'both',
                 True: {
                     'outlook': 'Positive',
-                    'meaning': 'Analytics libraries or containers load through Javascript script execution. The loading event alone does not create a compliance problem.'
+                    'meaning': 'Analytics containers load through Javascript script execution. The loading event alone does not create a compliance problem.'
                 },
                 False: {
                     'outlook': 'Neutral',
-                    'meaning': 'No analytics library loads detected'
+                    'meaning': 'No analytics container loads detected'
                 }
             }
         }
