@@ -44,10 +44,15 @@ This prototype tool provides comprehensive analysis of website cookie consent im
 
 ## Architecture
 ├── browser_manager.py      # Selenium-based browser automation
+
 ├── data_collection.py      # Main data collection orchestration
+
 ├── provider_registry.py    # CCM provider signatures and detection
+
 ├── d3_visualisation.py     # Network visualization generation
+
 ├── url_processor.py        # URL validation and processing
+
 └── main.ipynb             # Jupyter notebook interface
 
 ## Quick Start
@@ -113,15 +118,15 @@ Example Analysis Output
 ## Key Compliance Metrics
 ### Pre-Consent Analysis
 
-✅ No Third-Party Cookies: Ensures no tracking before consent
-✅ Page Accessibility: Verifies users can access content
-✅ Network Request Classification: Identifies request types and origins
+- No Third-Party Cookies: Ensures no tracking before consent
+- Page Accessibility: Verifies users can access content
+- Network Request Classification: Identifies request types and origins
 
 ### Post-Consent Analysis
 
-✅ Consent Respect: Verifies different behavior for accept vs reject
-✅ Cookie Classification: Analyzes security attributes
-✅ Analytics Activation: Monitors when tracking starts
+- Consent Respect: Verifies different behavior for accept vs reject
+- Cookie Classification: Analyzes security attributes
+- Analytics Activation: Monitors when tracking starts
 
 ## Limitations (Proof of Concept)
 
